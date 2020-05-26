@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 class TransformerModel(nn.Module):
 
-    def __init__(self, ntoken=255, ninp=2, nhead=2, nhid=2, nlayers=1, dropout=0.5):
+    def __init__(self, ntoken=2, ninp=2, nhead=2, nhid=2, nlayers=1, dropout=0.5):
         super(TransformerModel, self).__init__()
         from torch.nn import TransformerEncoder, TransformerEncoderLayer
         self.model_type = 'Transformer'
@@ -36,6 +36,7 @@ class TransformerModel(nn.Module):
             mask = self._generate_square_subsequent_mask(len(src)).to(device)
             self.src_mask = mask
 
+        import pdb;pdb.set_trace()
         src = self.encoder(src) * math.sqrt(self.ninp)
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, self.src_mask)
@@ -58,6 +59,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
+        import pdb;pdb.set_trace()
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 

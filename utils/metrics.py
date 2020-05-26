@@ -1,58 +1,88 @@
 import torch
 
 
-def corrcoef(x, REDUCE='mean'):
-    """
-    Mimics `np.corrcoef`
+def pearsonr(
+        x,
+        y,
+        REDUCE='mean',
+        batch_first=True,
+        eps=1e-8):
+    r"""Computes Pearson Correlation Coefficient across rows.
+    Pearson Correlation Coefficient (also known as Linear Correlation
+    Coefficient or Pearson's :math:`\rho`) is computed as:
+    .. math::
+        \rho = \frac {E[(X-\mu_X)(Y-\mu_Y)]} {\sigma_X\sigma_Y}
+    If inputs are matrices, then then we assume that we are given a
+    mini-batch of sequences, and the correlation coefficient is
+    computed for each sequence independently and returned as a vector. If
+    `batch_fist` is `True`, then we assume that every row represents a
+    sequence in the mini-batch, otherwise we assume that batch information
+    is in the columns.
+    Warning:
+        We do not account for the multi-dimensional case. This function has
+        been tested only for the 2D case, either in `batch_first==True` or in
+        `batch_first==False` mode. In the multi-dimensional case,
+        it is possible that the values returned will be meaningless.
+    Args:
+        x (torch.Tensor): input tensor
+        y (torch.Tensor): target tensor
+        batch_first (bool, optional): controls if batch dimension is first.
+            Default: `True`
+    Returns:
+        torch.Tensor: correlation coefficient between `x` and `y`
+    Note:
+        :math:`\sigma_X` is computed using **PyTorch** builtin
+        **Tensor.std()**, which by default uses Bessel correction:
+        .. math::
+            \sigma_X=\displaystyle\frac{1}{N-1}\sum_{i=1}^N({x_i}-\bar{x})^2
+        We therefore account for this correction in the computation of the
+        covariance by multiplying it with :math:`\frac{1}{N-1}`.
+    Shape:
+        - Input: :math:`(N, M)` for correlation between matrices,
+          or :math:`(M)` for correlation between vectors
+        - Target: :math:`(N, M)` or :math:`(M)`. Must be identical to input
+        - Output: :math:`(N, 1)` for correlation between matrices,
+          or :math:`(1)` for correlation between vectors
+    Examples:
+        >>> import torch
+        >>> _ = torch.manual_seed(0)
+        >>> input = torch.rand(3, 5)
+        >>> target = torch.rand(3, 5)
+        >>> output = pearsonr(input, target)
+        >>> print('Pearson Correlation between input and target is {0}'.format(output[:, 0]))
+        Pearson Correlation between input and target is tensor([ 0.2991, -0.8471,  0.9138])
+    """  # noqa: E501
+    assert x.shape == y.shape
 
-    Arguments
-    ---------
-    x : 2D torch.Tensor
-    
-    Returns
-    -------
-    c : torch.Tensor
-        if x.size() = (5, 100), then return val will be of size (5,5)
+    if batch_first:
+        dim = -1
+    else:
+        dim = 0
 
-    Numpy docs ref:
-        https://docs.scipy.org/doc/numpy/reference/generated/numpy.corrcoef.html
-    Numpy code ref: 
-        https://github.com/numpy/numpy/blob/v1.12.0/numpy/lib/function_base.py#L2933-L3013
+    centered_x = x - x.mean(dim=dim, keepdim=True)
+    centered_y = y - y.mean(dim=dim, keepdim=True)
 
-    Example:
-        >>> x = np.random.randn(5,120)
-        # result is a (5,5) matrix of correlations between rows
-        >>> np_corr = np.corrcoef(x)
-        >>> th_corr = corrcoef(torch.from_numpy(x))
-        >>> np.allclose(np_corr, th_corr.numpy())
-        # [out]: True
-    """
-    # calculate covariance matrix of rows
-    mean_x = torch.mean(x, 1)
-    xm = x.sub(mean_x.expand_as(x))
-    c = xm.mm(xm.t())
-    c = c / (x.size(1) - 1)
+    covariance = (centered_x * centered_y).sum(dim=dim, keepdim=True)
 
-    # normalize covariance matrix
-    d = torch.diag(c)
-    stddev = torch.pow(d, 0.5)
-    c = c.div(stddev.expand_as(c))
-    c = c.div(stddev.expand_as(c).t())
+    bessel_corrected_covariance = covariance / (x.shape[dim] - 1)
 
-    # clamp between -1 and 1
-    # probably not necessary but numpy does it
-    c = torch.clamp(c, -1.0, 1.0)
+    x_std = x.std(dim=dim, keepdim=True)
+    y_std = y.std(dim=dim, keepdim=True)
+
+    corr = bessel_corrected_covariance / (x_std * y_std + eps)
 
     if REDUCE == 'mean':
-        return c.mean()
+        return 1 - corr.mean()
     else:
-        raise NotImplementedError('REDUCE {} is not implemented'.format(REDUCE))
+        raise NotImplementedError(REDUCE)
 
 
 def get_metric(metric):
     """Wrapper for returning a function."""
-    if metric == 'pearson':
-        return corrcoef
+    if metric.lower() == 'pearson':
+        return pearsonr
+    elif metric.lower() == 'l2':
+        return lambda x, y: torch.norm(x - y, 2)
     else:
         return NotImplementedError('Metric {} not implemented'.format(metric))
 

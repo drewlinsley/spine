@@ -1,7 +1,7 @@
 import torch
 
 
-def get_optimizers(optimizer):
+def get_optimizer(optimizer):
     """Wrapper for optimizers."""
     if optimizer == "AdamW":
         return torch.optim.AdamW
