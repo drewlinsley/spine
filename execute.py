@@ -139,7 +139,6 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
                     cur_loss))
             total_loss = 0
             start_time = time.time()
-    import ipdb;ipdb.set_trace()
     return min_loss, max_loss
 
 
@@ -288,7 +287,6 @@ def run_training(
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model = model
-            import ipdb;ipdb.set_trace()
             if scheduler is not None:
                 scheduler.step()
     np.savez(os.path.join(output_dir, 'results_{}'.format(timestamp)), **meta.__dict__)
