@@ -1,0 +1,6 @@
+# Default params for the RNNs
+attention:
+    - False
+bidirectional:
+    - False
+

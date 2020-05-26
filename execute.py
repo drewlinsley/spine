@@ -1,13 +1,16 @@
 import os
+import sys
 import time
 import datetime
 import math
 import numpy as np
 import torch 
 import neptune
-from models.create_model import create_model
+import yaml
+from utils import modeling
 from utils import metrics
 from utils import optimizers
+from utils import tools
 
 
 np.random.seed(0)
@@ -26,6 +29,9 @@ class Meta:
             val_batch,
             val_split,  # How much to hold out for validation
             model_type,
+            input_size,
+            hidden_size,
+            output_size,
             metric,
             normalize_input,
             lr,
@@ -45,6 +51,9 @@ class Meta:
         self.data_size = data_size
         self.val_split = val_split
         self.model_type = model_type
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
         self.metric = metric
         self.normalize_input = normalize_input
         self.lr = lr
@@ -106,12 +115,10 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
     for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
         optimizer.zero_grad()
         flattened_y = y.reshape(y.size(0), -1)
-        if meta.model_type == "LSTM":
-            output, hiddens = model(x, (torch.randn(1, meta.train_batch, 2).to(meta.device), torch.randn(1, meta.train_batch, 2).to(meta.device)))  # noqa
-        elif meta.model_type == "GRU":
-            output, hiddens = model(x, (torch.randn(1, meta.train_batch, 2).to(meta.device)))
+        if meta.model_type == "LSTM" or meta.model_type == "GRU":
+            output, hiddens = model.forward(x)
         else:
-            output = model(x)
+            output = model.forward(x)
         loss = criterion(output.reshape(x.size(0), -1), flattened_y)
         loss.backward()
         if meta.clip_grad_norm:
@@ -121,12 +128,11 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
         total_loss += loss
         min_loss = min(loss, min_loss)
         max_loss = max(loss, max_loss)
-        if batch % meta.log_interval == 0 and batch > 0:
+        if batch % meta.log_interval == 0 and batch > 0 or batch == (len(offset_X) - 1):
             if scheduler is not None:
                 current_lr = scheduler.get_lr()[0]
             else:
                 current_lr = meta.lr
-            cur_loss = total_loss / meta.log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr {:02.2f} | ms/batch {:5.2f} | '
@@ -136,7 +142,7 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
                     len(X) // meta.bptt,
                     current_lr,  # scheduler.get_lr()[0],
                     elapsed * 1000 / meta.log_interval,
-                    cur_loss))
+                    loss))
             total_loss = 0
             start_time = time.time()
     return min_loss, max_loss
@@ -149,30 +155,30 @@ def evaluate(model, X, Y, criterion, meta):
         offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt)
         for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
             flattened_y = y.reshape(y.size(0), -1)
-            if meta.model_type == "LSTM":
-                output, _ = model(x, (torch.randn(1, meta.val_batch, 2).to(meta.device), torch.randn(1, meta.val_batch, 2).to(meta.device)))  # noqa
-            elif meta.model_type == "GRU":
-                output, _ = model(x, (torch.randn(1, meta.val_batch, 2).to(meta.device)))
+            if meta.model_type == "LSTM" or meta.model_type == "GRU":
+                output, hiddens = model.forward(x)
             else:
-                output = model(x)
-            total_loss += len(x) * criterion(
+                output = model.forward(x)
+            total_loss += criterion(
                 output.reshape(x.size(0), -1), flattened_y)
-    return total_loss / (len(X) - 1)
+    return total_loss / len(offset_X)
 
 
 def run_training(
-        epochs=100,
-        train_batch=128,
-        val_batch=2048,
+        experiment_name,
+        epochs=1000,
+        train_batch=49458,
+        val_batch=12365,
         dtype=np.float32,
         val_split=0.2,
         shuffle_data=False,
-        model_type='GRU',  # 'transformer',
-        bptt=-1,
+        model_type="GRU",  # 'transformer',
+        bptt=600,
+        hidden_size=3,
         lr=1e-1,
         start_trim=600,
         log_interval=5,
-        val_interval=1000,
+        val_interval=20,
         clip_grad_norm=False,
         output_dir='results',
         normalize_input=True,
@@ -182,7 +188,10 @@ def run_training(
     """Run training and validation."""
     if USE_NEPTUNE:
         neptune.init("Serre-Lab/deepspine")
-        neptune.create_experiment("synthetic_data_v0")
+        if experiment_name is None:
+            experiment_name = "synthetic_data"
+        neptune.create_experiment(experiment_name)
+    default_model_params = tools.get_model_defaults()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     timestamp = datetime.datetime.fromtimestamp(
         time.time()).strftime('%Y-%m-%d-%H_%M_%S')
@@ -194,12 +203,17 @@ def run_training(
     Y = torch.from_numpy(mn.astype(dtype))
     X = X.permute(0, 2, 1)
     Y = Y.permute(0, 2, 1)
+    input_size = X.size(-1)
+    output_size = Y.size(-1)
     meta = Meta(
         data_size=X.shape,
         train_batch=train_batch,
         val_batch=val_batch,
         val_split=val_split,
         model_type=model_type,
+        input_size=input_size,
+        hidden_size=hidden_size,
+        output_size=output_size,
         metric=metric,
         normalize_input=normalize_input,
         lr=lr,
@@ -224,8 +238,10 @@ def run_training(
         Y = Y[idx]
 
     if meta.normalize_input:
-        X = X / 255.
-        Y = Y / 255.
+        # X = (X - 127.5) / 127.5
+        # Y = (Y - 127.5) / 127.5
+        X = (X - X.mean(1).unsqueeze(1)) / (X.std(1).unsqueeze(1) + 1e-4)  # This is peaking but whatever...
+        Y = (Y - Y.mean(1).unsqueeze(1)) / (Y.std(1).unsqueeze(1) + 1e-4)
     X = X.to(meta.device)
     Y = Y.to(meta.device)
     cv_idx = np.arange(len(X))
@@ -234,9 +250,17 @@ def run_training(
     Y_train = Y[cv_idx]
     X_val = X[~cv_idx]
     Y_val = Y[~cv_idx]
+    assert meta.train_batch < len(X_train), "Train batch size > dataset size {}.".format(len(X_train))
+    assert meta.val_batch < len(X_val), "Val batch size > dataset size {}.".format(len(X_val))
 
     # Create model
-    model = create_model(model_type=meta.model_type).to(meta.device)
+    model = modeling.create_model(
+        model_type=meta.model_type,
+        input_size=meta.input_size,
+        hidden_size=meta.hidden_size,
+        output_size=meta.output_size,
+        default_model_params=default_model_params,
+        device=meta.device)
     criterion = metrics.get_metric(metric)
     optimizer = optimizers.get_optimizer(optimizer)
     assert lr < 1, "LR is greater than 1."
@@ -263,7 +287,7 @@ def run_training(
             criterion=criterion,
             scheduler=scheduler,
             meta=meta)
-        if meta.val_interval % epoch == 0:
+        if epoch % meta.val_interval == 0:
             val_loss = evaluate(
                 model=model,
                 X=X_val,
@@ -293,5 +317,6 @@ def run_training(
 
 
 if __name__ == '__main__':
-    run_training()
+    _, experiment_name = sys.argv
+    run_training(experiment_name)
 
