@@ -55,7 +55,7 @@ def pearsonr(
     assert x.shape == y.shape
 
     if batch_first:
-        dim = -1
+        dim = 1
     else:
         dim = 0
 

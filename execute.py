@@ -114,12 +114,12 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
     # for batch, i in enumerate(range(0, X.size(0) - 1, meta.bptt)):
     for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
         optimizer.zero_grad()
-        flattened_y = y.reshape(y.size(0), -1)
+        # flattened_y = y.reshape(y.size(0), -1)
         if meta.model_type == "LSTM" or meta.model_type == "GRU":
             output, hiddens = model.forward(x)
         else:
             output = model.forward(x)
-        loss = criterion(output.reshape(x.size(0), -1), flattened_y)
+        loss = criterion(output, y)
         loss.backward()
         if meta.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(model.parameters(), meta.clip_grad_norm)
@@ -145,7 +145,7 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
                     loss))
             total_loss = 0
             start_time = time.time()
-    return min_loss, max_loss
+    return min_loss, max_loss, output, y
 
 
 def evaluate(model, X, Y, criterion, meta):
@@ -154,19 +154,19 @@ def evaluate(model, X, Y, criterion, meta):
     with torch.no_grad():
         offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt)
         for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
-            flattened_y = y.reshape(y.size(0), -1)
+            # flattened_y = y.reshape(y.size(0), -1)
             if meta.model_type == "LSTM" or meta.model_type == "GRU":
                 output, hiddens = model.forward(x)
             else:
                 output = model.forward(x)
-            total_loss += criterion(
-                output.reshape(x.size(0), -1), flattened_y)
-    return total_loss / len(offset_X)
+            total_loss += criterion(output, y)
+    return total_loss / len(offset_X), output, y
 
 
 def run_training(
         experiment_name,
-        epochs=1000,
+        debug=False,
+        epochs=10000,
         train_batch=49458,
         val_batch=12365,
         dtype=np.float32,
@@ -180,11 +180,11 @@ def run_training(
         log_interval=5,
         val_interval=20,
         clip_grad_norm=False,
-        output_dir='results',
+        output_dir="results",
         normalize_input=True,
-        optimizer='Adam',
-        scheduler=None,  # 'StepLR',
-        metric='pearson'):  # pearson
+        optimizer="Adam",
+        scheduler="StepLR",
+        metric="pearson"):  # pearson
     """Run training and validation."""
     if USE_NEPTUNE:
         neptune.init("Serre-Lab/deepspine")
@@ -240,8 +240,8 @@ def run_training(
     if meta.normalize_input:
         # X = (X - 127.5) / 127.5
         # Y = (Y - 127.5) / 127.5
-        X = (X - X.mean(1).unsqueeze(1)) / (X.std(1).unsqueeze(1) + 1e-4)  # This is peaking but whatever...
-        Y = (Y - Y.mean(1).unsqueeze(1)) / (Y.std(1).unsqueeze(1) + 1e-4)
+        X = (X - X.mean(1, keepdim=True)) / (X.std(1, keepdim=True) + 1e-8)  # This is peaking but whatever...
+        Y = (Y - Y.mean(1, keepdim=True)) / (Y.std(1, keepdim=True) + 1e-8)
     X = X.to(meta.device)
     Y = Y.to(meta.device)
     cv_idx = np.arange(len(X))
@@ -279,7 +279,7 @@ def run_training(
         meta.epoch = epoch
         X_train_i, random_idx = batchify(X_train, bsz=meta.train_batch, random=True)
         Y_train_i, _ = batchify(Y_train, bsz=meta.train_batch, random=random_idx)
-        min_train_loss, max_train_loss = train(
+        min_train_loss, max_train_loss, train_output, train_gt = train(
             model=model,
             X=X_train_i,
             Y=Y_train_i,
@@ -288,7 +288,7 @@ def run_training(
             scheduler=scheduler,
             meta=meta)
         if epoch % meta.val_interval == 0:
-            val_loss = evaluate(
+            val_loss, val_output, val_gt = evaluate(
                 model=model,
                 X=X_val,
                 Y=Y_val,
@@ -311,9 +311,32 @@ def run_training(
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model = model
+            if val_loss < 0.7 and debug:
+                from matplotlib import pyplot as plt
+                fig = plt.figure()
+                plt.title('val')
+                plt.subplot(211)
+                plt.plot(val_output[50].cpu())
+                plt.subplot(212)
+                plt.plot(val_gt[50].cpu())
+                plt.show()
+                plt.close(fig)
+                fig = plt.figure()
+                plt.title('train')
+                plt.subplot(211)
+                plt.plot(train_output[50].cpu().detach())
+                plt.subplot(212)
+                plt.plot(train_gt[50].cpu())
+                plt.show()
+                plt.close(fig)
             if scheduler is not None:
                 scheduler.step()
-    np.savez(os.path.join(output_dir, 'results_{}'.format(timestamp)), **meta.__dict__)
+
+    # Fix some type issues
+    meta.val_loss = [x.cpu() for x in meta.val_loss]
+    meta.min_train_loss = [x.cpu() for x in meta.min_train_loss]
+    meta.max_train_loss = [x.cpu() for x in meta.max_train_loss]
+    np.savez(os.path.join(output_dir, '{}results_{}'.format(experiment_name, timestamp)), **meta.__dict__)  # noqa
 
 
 if __name__ == '__main__':
