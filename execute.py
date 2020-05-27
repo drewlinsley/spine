@@ -33,6 +33,7 @@ class Meta:
             hidden_size,
             output_size,
             metric,
+            score,
             normalize_input,
             lr,
             bptt,
@@ -43,6 +44,7 @@ class Meta:
             start_trim,
             log_interval,
             val_interval,
+            train_weight,
             device):
         """Store the info."""
         self.train_batch = train_batch
@@ -55,6 +57,7 @@ class Meta:
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.metric = metric
+        self.score = score
         self.normalize_input = normalize_input
         self.lr = lr
         self.bptt = bptt
@@ -65,9 +68,11 @@ class Meta:
         self.start_trim = start_trim
         self.log_interval = log_interval
         self.val_interval = val_interval
+        self.train_weight = train_weight
         self.min_train_loss = []
         self.max_train_loss = []
         self.val_loss = []
+        self.val_score = []
         self.train_loss = []
 
 
@@ -104,7 +109,7 @@ def get_batch(X, Y, bptt, shared_offset=True):
     return X, Y
 
 
-def train(model, X, Y, optimizer, criterion, scheduler, meta):
+def train(model, X, Y, optimizer, criterion, score, scheduler, meta):
     """Loop for training."""
     model.train()
     total_loss = 0.
@@ -114,12 +119,15 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
     # for batch, i in enumerate(range(0, X.size(0) - 1, meta.bptt)):
     for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
         optimizer.zero_grad()
-        # flattened_y = y.reshape(y.size(0), -1)
         if meta.model_type == "LSTM" or meta.model_type == "GRU":
             output, hiddens = model.forward(x)
         else:
             output = model.forward(x)
-        loss = criterion(output, y)
+        if meta.metric == "bce":
+            loss = criterion(
+                pos_weight=torch.ones(output.size(2)).to(meta.device) * meta.train_weight)(output, y)
+        else:
+            loss = criterion(output, y)
         loss.backward()
         if meta.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(model.parameters(), meta.clip_grad_norm)
@@ -129,6 +137,7 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
         min_loss = min(loss, min_loss)
         max_loss = max(loss, max_loss)
         if batch % meta.log_interval == 0 and batch > 0 or batch == (len(offset_X) - 1):
+            sc = score(output, y)
             if scheduler is not None:
                 current_lr = scheduler.get_lr()[0]
             else:
@@ -136,21 +145,23 @@ def train(model, X, Y, optimizer, criterion, scheduler, meta):
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr {:02.2f} | ms/batch {:5.2f} | '
-                  'loss {:5.2f}'.format(
+                  'loss {:5.2f} | score {:5.2f}'.format(
                     meta.epoch,
                     batch,
                     len(X) // meta.bptt,
                     current_lr,  # scheduler.get_lr()[0],
                     elapsed * 1000 / meta.log_interval,
-                    loss))
+                    loss,
+                    sc))
             total_loss = 0
             start_time = time.time()
     return min_loss, max_loss, output, y
 
 
-def evaluate(model, X, Y, criterion, meta):
+def evaluate(model, X, Y, criterion, score, meta):
+    """Score the validation set."""
     model.eval() # Turn on the evaluation mode
-    total_loss = 0.
+    total_loss, total_sc = 0., 0.
     with torch.no_grad():
         offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt)
         for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
@@ -159,32 +170,38 @@ def evaluate(model, X, Y, criterion, meta):
                 output, hiddens = model.forward(x)
             else:
                 output = model.forward(x)
-            total_loss += criterion(output, y)
-    return total_loss / len(offset_X), output, y
+            if meta.metric == "bce":
+                total_loss += criterion()(output, y)
+            else:
+                total_loss += criterion(output, y)
+            total_sc += score(output, y)
+    return total_loss / len(offset_X), total_sc / len(offset_X), output, y
 
 
 def run_training(
         experiment_name,
         debug=False,
         epochs=10000,
-        train_batch=49458,
-        val_batch=12365,
+        train_batch=58732 // 2,
+        val_batch=3091,
         dtype=np.float32,
-        val_split=0.2,
-        shuffle_data=False,
+        val_split=0.05,
+        shuffle_data=True,
         model_type="GRU",  # 'transformer',
-        bptt=600,
+        bptt=700,
         hidden_size=3,
-        lr=1e-1,
-        start_trim=600,
+        lr=1e-2,
+        start_trim=650,
         log_interval=5,
         val_interval=20,
         clip_grad_norm=False,
         output_dir="results",
         normalize_input=True,
-        optimizer="Adam",
+        optimizer="AdamW",
         scheduler="StepLR",
-        metric="pearson"):  # pearson
+        train_weight=10.,
+        score="pearson",
+        metric="l2_pearson"):  # pearson
     """Run training and validation."""
     if USE_NEPTUNE:
         neptune.init("Serre-Lab/deepspine")
@@ -215,6 +232,7 @@ def run_training(
         hidden_size=hidden_size,
         output_size=output_size,
         metric=metric,
+        score=score,
         normalize_input=normalize_input,
         lr=lr,
         bptt=bptt,
@@ -225,6 +243,7 @@ def run_training(
         log_interval=log_interval,
         val_interval=val_interval,
         start_trim=start_trim,
+        train_weight=train_weight,
         device=device)
 
     # Prepare data
@@ -237,11 +256,16 @@ def run_training(
         X = X[idx]
         Y = Y[idx]
 
+    if meta.metric == "bce":
+        # Quantize Y
+        Y = (Y > 127.5).float()
+
     if meta.normalize_input:
         # X = (X - 127.5) / 127.5
         # Y = (Y - 127.5) / 127.5
         X = (X - X.mean(1, keepdim=True)) / (X.std(1, keepdim=True) + 1e-8)  # This is peaking but whatever...
-        Y = (Y - Y.mean(1, keepdim=True)) / (Y.std(1, keepdim=True) + 1e-8)
+        if meta.metric != "bce":
+            Y = (Y - Y.mean(1, keepdim=True)) / (Y.std(1, keepdim=True) + 1e-8)
     X = X.to(meta.device)
     Y = Y.to(meta.device)
     cv_idx = np.arange(len(X))
@@ -250,8 +274,8 @@ def run_training(
     Y_train = Y[cv_idx]
     X_val = X[~cv_idx]
     Y_val = Y[~cv_idx]
-    assert meta.train_batch < len(X_train), "Train batch size > dataset size {}.".format(len(X_train))
-    assert meta.val_batch < len(X_val), "Val batch size > dataset size {}.".format(len(X_val))
+    assert meta.train_batch < len(X_train), "Train batch size > dataset size {}.".format(len(X_train) - 1)
+    assert meta.val_batch < len(X_val), "Val batch size > dataset size {}.".format(len(X_val) - 1)
 
     # Create model
     model = modeling.create_model(
@@ -261,10 +285,13 @@ def run_training(
         output_size=meta.output_size,
         default_model_params=default_model_params,
         device=meta.device)
-    criterion = metrics.get_metric(metric)
-    optimizer = optimizers.get_optimizer(optimizer)
+    score, criterion = metrics.get_metric(metric)
+    optimizer_fun = optimizers.get_optimizer(optimizer)
     assert lr < 1, "LR is greater than 1."
-    optimizer = optimizer(model.parameters(), lr=lr)
+    if "adam" in optimizer.lower():
+        optimizer = optimizer_fun(model.parameters(), lr=lr, amsgrad=True)
+    else:
+        optimizer = optimizer_fun(model.parameters(), lr=lr)
     if scheduler is not None:
         scheduler = optimizers.get_scheduler(scheduler) 
         scheduler = scheduler(optimizer)
@@ -285,33 +312,37 @@ def run_training(
             Y=Y_train_i,
             optimizer=optimizer,
             criterion=criterion,
+            score=score,
             scheduler=scheduler,
             meta=meta)
         if epoch % meta.val_interval == 0:
-            val_loss, val_output, val_gt = evaluate(
+            val_loss, val_score, val_output, val_gt = evaluate(
                 model=model,
                 X=X_val,
                 Y=Y_val,
                 criterion=criterion,
+                score=score,
                 meta=meta)
             meta.min_train_loss.append(min_train_loss)
             meta.max_train_loss.append(max_train_loss)
             meta.val_loss.append(val_loss)
+            meta.val_score.append(val_score)
             print('-' * 89)
-            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f}'.format(
+            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | valid score {:5.2f}'.format(
                   epoch,
                   (time.time() - epoch_start_time),
-                  meta.val_loss[-1]))
+                  meta.val_loss[-1],
+                  meta.val_score[-1]))
             print('-' * 89)
             if USE_NEPTUNE:
                 neptune.log_metric('min_train_loss', min_train_loss)
                 neptune.log_metric('max_train_loss', max_train_loss)
-                neptune.log_metric('val_loss', val_loss)
-
+                neptune.log_metric('val_{}'.format(meta.metric), val_loss)
+                neptune.log_metric('val_pearson', val_score)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model = model
-            if val_loss < 0.7 and debug:
+            if val_loss < 0.65 and debug:
                 from matplotlib import pyplot as plt
                 fig = plt.figure()
                 plt.title('val')
@@ -334,6 +365,7 @@ def run_training(
 
     # Fix some type issues
     meta.val_loss = [x.cpu() for x in meta.val_loss]
+    meta.val_score = [x.cpu() for x in meta.val_score]
     meta.min_train_loss = [x.cpu() for x in meta.min_train_loss]
     meta.max_train_loss = [x.cpu() for x in meta.max_train_loss]
     np.savez(os.path.join(output_dir, '{}results_{}'.format(experiment_name, timestamp)), **meta.__dict__)  # noqa

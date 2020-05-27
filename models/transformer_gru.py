@@ -4,8 +4,8 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class LSTM(nn.Module):
-    """LSTM with a linear readout shared across timesteps."""
+class GRU(nn.Module):
+    """GRU with a linear readout shared across timesteps."""
     def __init__(
             self,
             input_size,
@@ -15,9 +15,10 @@ class LSTM(nn.Module):
             dropout=False,
             bidirectional=False,
             num_layers=1,
+            num_heads=2,
             max_length=50,
-            batch_first=True):
-        super(LSTM, self).__init__()
+            batch_first=False):
+        super(GRU, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.batch_first = batch_first
@@ -27,10 +28,8 @@ class LSTM(nn.Module):
         if self.bidirectional:
             self.multiplier = 2
         if self.attention:
-            self.attn = nn.Linear(self.hidden_size, max_length)
-            self.attn_combine = nn.Linear(self.hidden_size, self.hidden_size)
-            
-        self.lstm = nn.LSTM(
+            self.attention = nn.Transformer(nheads=num_heads, num_encoder_layers=num_layers)
+        self.gru = nn.GRU(
             input_size,
             hidden_size,
             bidirectional=bidirectional,
@@ -42,13 +41,9 @@ class LSTM(nn.Module):
     def forward(self, input):
         """Process data."""
         if self.attention:
-            raise RuntimeError("Attention is not working properly.")
-            attn_weights = F.softmax(self.attn(input))
-            input = torch.bmm(
-                attn_weights.unsqueeze(0),
-                input.unsqueeze(0))
-        hidden, cell = self.init_hidden(input)
-        output, hidden, cell = self.lstm(input, hidden, cell)
+            pass
+        hidden = self.init_hidden(input)
+        output, hidden = self.gru(input, hidden)
         output = self.out(output)
         return output, hidden
 
@@ -56,9 +51,7 @@ class LSTM(nn.Module):
         """Initialize hidden states."""
         assert self.batch_first, "Only designed for batch_first right now."
         dim_zero = self.num_layers * self.multiplier
-        h_0 = torch.zeros(
+        return torch.zeros(
             dim_zero,
             input.size(0), self.hidden_size, device=input.device)
-        c_0 = torch.zeros_like(h_0)
-        return h_0, c_0
 

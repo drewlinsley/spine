@@ -2,5 +2,6 @@
 
 attention: False
 bidirectional: False
-dropout: 0.5
-num_layers: 5
+dropout: 0.
+num_layers: 1
+

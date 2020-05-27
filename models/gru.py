@@ -35,10 +35,8 @@ class GRU(nn.Module):
             hidden_size,
             bidirectional=bidirectional,
             num_layers=num_layers,
+            dropout=dropout,
             batch_first=batch_first)
-        if dropout:
-            assert np.logical_and(dropout > 0, dropout < 1), "Dropout must be between (0, 1)."
-            self.dropout = nn.Dropout(dropout)
         self.out = nn.Linear(self.multiplier * hidden_size, output_size)
 
     def forward(self, input):

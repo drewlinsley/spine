@@ -72,17 +72,35 @@ def pearsonr(
     corr = bessel_corrected_covariance / (x_std * y_std + eps)
 
     if REDUCE == 'mean':
-        return 1 - corr.mean()
+        corr = 1 - corr.mean()
+        if corr < 0.5:
+            import ipdb;ipdb.set_trace()
+        return corr
     else:
         raise NotImplementedError(REDUCE)
 
 
+def bce_pearson(x, y):
+    """Pearson after thresholding x."""
+    # return pearsonr((torch.sigmoid(x)), y)
+    return pearsonr((torch.sigmoid(x) > 0.5).float(), y)
+
+
 def get_metric(metric):
     """Wrapper for returning a function."""
+    score = pearsonr
     if metric.lower() == 'pearson':
-        return pearsonr
+        metric = pearsonr
     elif metric.lower() == 'l2':
-        return lambda x, y: torch.norm(x - y, 2)
+        metric = lambda x, y: torch.norm(x - y, 2)
+    elif metric.lower() == 'l2_pearson':
+        metric = lambda x, y: (pearsonr(x, y) + 1e-4 * torch.norm(x - y, 2))
+    elif metric.lower() == 'l1_pearson':
+        metric = lambda x, y: (pearsonr(x, y) + 1e-2 * torch.norm(x - y, 1))
+    elif metric.lower() == 'bce':
+        metric = torch.nn.BCEWithLogitsLoss  # (pos_weight=torch.Tensor(10))
+        score = bce_pearson
     else:
         return NotImplementedError('Metric {} not implemented'.format(metric))
+    return score, metric
 

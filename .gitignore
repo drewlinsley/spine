@@ -2,3 +2,6 @@ data
 results
 *.npy
 *.npz
+config.py
+db/credentials.py
+
