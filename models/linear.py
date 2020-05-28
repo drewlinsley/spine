@@ -20,9 +20,10 @@ class linear(nn.Module):
             attention=False,
             dropout=False,
             bidirectional=False,
+            dilation=1,
             num_layers=1,
             max_length=50,
-            kernel_size=4,
+            kernel_size=6,
             batch_first=False):
         super(linear, self).__init__()
         self.hidden_size = hidden_size
@@ -55,7 +56,7 @@ class linear(nn.Module):
             out_channels=hidden_size,
             kernel_size=kernel_size,
             groups=1,
-            dilation=2))
+            dilation=dilation))
         for _ in range(num_layers - 1): 
             self.layers.append(CausalConv1d(
                 in_channels=hidden_size,
@@ -75,7 +76,7 @@ class linear(nn.Module):
         # input = torch.cat((torch.sin(input), torch.cos(input)), -1)
         # output = torch.sigmoid(self.out(input))
         input = input.permute(0, 2, 1)
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             input = F.leaky_relu(layer(input))
         # input = input.permute(0, 2, 1)
         output = input.view(in_shape[0], -1).contiguous()

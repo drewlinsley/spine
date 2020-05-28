@@ -224,7 +224,7 @@ def run_training(
         train_weight=10.,
         batch_first=True,
         toss_allzero_mn=False,
-        dumb_augment=True,
+        dumb_augment=False,
         score="pearson",
         metric="pearson"):  # pearson
     """Run training and validation."""
@@ -340,6 +340,8 @@ def run_training(
         output_size=meta.output_size,
         default_model_params=default_model_params,
         device=meta.device)
+    num_params = sum([p.numel() for p in model.parameters() if p.requires_grad])
+    print('Total number of parameters: {}'.format(num_params))
     score, criterion = metrics.get_metric(metric, meta.batch_first)
     optimizer_fun = optimizers.get_optimizer(optimizer)
     assert lr < 1, "LR is greater than 1."

@@ -1,7 +1,7 @@
 # Default params for the GRUs
 
 dropout: 0
-num_layers: 3
+num_layers: 12
 attention: False
 bidirectional: False
 
