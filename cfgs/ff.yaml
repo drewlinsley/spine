@@ -1,0 +1,5 @@
+# Default params for the GRUs
+
+dropout: 0
+num_layers: 8
+

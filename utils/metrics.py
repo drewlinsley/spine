@@ -1,7 +1,7 @@
 import torch
 
 
-def pearsonr(
+def pearsonr_old(
         x,
         y,
         REDUCE='mean',
@@ -73,9 +73,29 @@ def pearsonr(
 
     if REDUCE == 'mean':
         corr = 1 - corr.mean()
-        if corr < 0.5:
-            import ipdb;ipdb.set_trace()
         return corr
+    else:
+        raise NotImplementedError(REDUCE)
+
+
+def pearsonr(x, y, batch_first=False, eps=1e-8, REDUCE="mean"):
+    """My implementation of pearson."""
+    if batch_first:
+        dim = 1
+    else:
+        dim = 0
+    vx = x - x.mean(dim, keepdim=True)
+    vy = y - y.mean(dim, keepdim=True)
+    numerator = (vx * vy).sum(dim, keepdim=True)
+    ssx = torch.sqrt(((vx + eps) ** 2).sum(dim=dim, keepdim=True))
+    ssy = torch.sqrt(((vy + eps) ** 2).sum(dim=dim, keepdim=True))
+    denominator = ssx * ssy
+    loss = 1 - (numerator / denominator)
+    if REDUCE == "mean":
+        loss = loss.mean()
+        return loss
+    elif REDUCE == "max":
+        return loss.max(-1)[0].mean()
     else:
         raise NotImplementedError(REDUCE)
 
@@ -86,20 +106,22 @@ def bce_pearson(x, y):
     return pearsonr((torch.sigmoid(x) > 0.5).float(), y)
 
 
-def get_metric(metric):
+def get_metric(metric, batch_first):
     """Wrapper for returning a function."""
     score = pearsonr
     if metric.lower() == 'pearson':
         metric = pearsonr
+    elif metric.lower() == "pearson_max":
+        metric = lambda x, y: pearsonr(x, y, REDUCE="max")
     elif metric.lower() == 'l2':
         metric = lambda x, y: torch.norm(x - y, 2)
     elif metric.lower() == 'l2_pearson':
-        metric = lambda x, y: (pearsonr(x, y) + 1e-4 * torch.norm(x - y, 2))
+        metric = lambda x, y: (pearsonr(x, y, batch_first) + 1e-4 * torch.norm(x - y, 2))
     elif metric.lower() == 'l1_pearson':
-        metric = lambda x, y: (pearsonr(x, y) + 1e-2 * torch.norm(x - y, 1))
+        metric = lambda x, y: (pearsonr(x, y, batch_first) + 1e-2 * torch.norm(x - y, 1))
     elif metric.lower() == 'bce':
         metric = torch.nn.BCEWithLogitsLoss  # (pos_weight=torch.Tensor(10))
-        score = bce_pearson
+        score = lambda x, y: bce_pearson(x, y, batch_first)
     else:
         return NotImplementedError('Metric {} not implemented'.format(metric))
     return score, metric

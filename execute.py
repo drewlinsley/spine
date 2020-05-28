@@ -3,6 +3,7 @@ import sys
 import time
 import datetime
 import math
+import argparse
 import numpy as np
 import torch 
 import neptune
@@ -17,18 +18,19 @@ np.random.seed(0)
 torch.manual_seed(0)
 DATA_DIR  = "data"
 DATA_FILE = os.path.join(DATA_DIR, "processed_data_uint8.npz")
-USE_NEPTUNE = True
 
 
 class Meta:
     """Hold experiment meta info."""
     def __init__(
             self,
+            batch_first,
             data_size,
             train_batch,
             val_batch,
             val_split,  # How much to hold out for validation
             model_type,
+            model_cfg,
             input_size,
             hidden_size,
             output_size,
@@ -47,12 +49,14 @@ class Meta:
             train_weight,
             device):
         """Store the info."""
+        self.batch_first = batch_first
         self.train_batch = train_batch
         self.val_batch = val_batch
         self.device = device
         self.data_size = data_size
         self.val_split = val_split
         self.model_type = model_type
+        self.model_cfg = model_cfg
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -76,36 +80,50 @@ class Meta:
         self.train_loss = []
 
 
-def batchify(data, bsz, random=False):
+def batchify(data, bsz, random=False, batch_first=True):
     """Divide the dataset into bsz parts."""
-    nbatch = data.size(0) // bsz
-    # Trim off any extra elements that wouldn't cleanly fit (remainders).
-    data = data.narrow(0, 0, nbatch * bsz)
-    # Evenly divide the data across the bsz batches.
-    # from matplotlib import pyplot as plt
-    # plt.plot(data[0].cpu());plt.show()
-    data = data.view(nbatch, bsz, data.size(1), data.size(2)).contiguous()
-    # plt.plot(data[0, 0].cpu());plt.show()
-    if type(random) == bool and random == True:
-        random = np.random.permutation(len(data))
-        data = data[random]
-    elif type(random) == np.ndarray:
-        data = data[random]
+    if batch_first:
+        if type(random) == bool and random == True:
+            random = np.random.permutation(len(data))
+            data = data[random]
+        elif type(random) == np.ndarray:
+            data = data[random]
+        nbatch = data.size(0) // bsz
+        # Trim off any extra elements that wouldn't cleanly fit (remainders).
+        data = data.narrow(0, 0, nbatch * bsz)
+        # Evenly divide the data across the bsz batches.
+        data = data.view(nbatch, bsz, data.size(1), data.size(2)).contiguous()
+    else:
+        if type(random) == bool and random == True:
+            random = np.random.permutation(data.size(1))
+            data = data[:, random]
+        elif type(random) == np.ndarray:
+            data = data[:, random]
+        nbatch = data.size(1) // bsz
+        # Trim off any extra elements that wouldn't cleanly fit (remainders).
+        data = data.narrow(1, 0, nbatch * bsz)
+        # Evenly divide the data across the bsz batches.
+        data = data.view(data.size(0), nbatch, bsz, data.size(2)).contiguous()
+        data = data.permute(1, 0, 2, 3)  # Put batches first
     return data, random  # .to(device)
 
 
-def get_batch(X, Y, bptt, shared_offset=True):
+def get_batch(X, Y, bptt, shared_offset=True, batch_first=True):
     """Select from the time axis. Shared_offset is faster."""
-    high = X.size(2) - bptt
+    if batch_first:
+        dim = 2
+    else:
+        dim = 1
+    high = X.size(dim) - bptt
     assert high > 0
     if shared_offset and bptt > 0:
         offset = np.random.randint(low=0, high=high)
-        X = X.narrow(2, offset, bptt)
-        Y = Y.narrow(2, offset, bptt)
+        X = X.narrow(dim, offset, bptt)
+        Y = Y.narrow(dim, offset, bptt)
     elif bptt > 0:
         raise NotImplementedError("Havent worked out narrow with an array yet.")
-        offset = np.random.randint(low=0, high=high, size=X.size(1))
-        X = X.narrow(2, offset, bptt)
+        # offset = np.random.randint(low=0, high=high, size=X.size(dim))
+        # X = X.narrow(dim, offset, bptt)
     return X, Y
 
 
@@ -115,14 +133,11 @@ def train(model, X, Y, optimizer, criterion, score, scheduler, meta):
     total_loss = 0.
     start_time = time.time()
     min_loss, max_loss = np.inf, -np.inf
-    offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt)
+    offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt, batch_first=meta.batch_first)
     # for batch, i in enumerate(range(0, X.size(0) - 1, meta.bptt)):
     for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
         optimizer.zero_grad()
-        if meta.model_type == "LSTM" or meta.model_type == "GRU":
-            output, hiddens = model.forward(x)
-        else:
-            output = model.forward(x)
+        output, hiddens = model.forward(x)
         if meta.metric == "bce":
             loss = criterion(
                 pos_weight=torch.ones(output.size(2)).to(meta.device) * meta.train_weight)(output, y)
@@ -137,7 +152,10 @@ def train(model, X, Y, optimizer, criterion, score, scheduler, meta):
         min_loss = min(loss, min_loss)
         max_loss = max(loss, max_loss)
         if batch % meta.log_interval == 0 and batch > 0 or batch == (len(offset_X) - 1):
-            sc = score(output, y)
+            if meta.metric != meta.score:
+                sc = score(output, y)
+            else:
+                sc = loss
             if scheduler is not None:
                 current_lr = scheduler.get_lr()[0]
             else:
@@ -163,47 +181,54 @@ def evaluate(model, X, Y, criterion, score, meta):
     model.eval() # Turn on the evaluation mode
     total_loss, total_sc = 0., 0.
     with torch.no_grad():
-        offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt)
+        offset_X, offset_Y = get_batch(X=X, Y=Y, bptt=meta.bptt, batch_first=meta.batch_first)
         for batch, (x, y) in enumerate(zip(offset_X, offset_Y)):
             # flattened_y = y.reshape(y.size(0), -1)
-            if meta.model_type == "LSTM" or meta.model_type == "GRU":
-                output, hiddens = model.forward(x)
-            else:
-                output = model.forward(x)
+            output, hiddens = model.forward(x)
             if meta.metric == "bce":
-                total_loss += criterion()(output, y)
+                it_loss = criterion()(output, y)
             else:
-                total_loss += criterion(output, y)
-            total_sc += score(output, y)
+                it_loss = criterion(output, y)
+            total_loss += it_loss
+            if meta.metric != meta.score:
+                sc = score(output, y)
+            else:
+                sc = it_loss
+            total_sc += sc
     return total_loss / len(offset_X), total_sc / len(offset_X), output, y
 
 
 def run_training(
         experiment_name,
         debug=False,
+        use_neptune=False,
         epochs=10000,
-        train_batch=58732 // 2,
+        train_batch=58732 // 4,
         val_batch=3091,
         dtype=np.float32,
         val_split=0.05,
         shuffle_data=True,
-        model_type="GRU",  # 'transformer',
+        model_type="linear",  # "GRU",  # 'transformer',
+        model_cfg=None,
         bptt=700,
-        hidden_size=3,
+        hidden_size=6,
         lr=1e-2,
-        start_trim=650,
+        start_trim=750,
         log_interval=5,
         val_interval=20,
         clip_grad_norm=False,
         output_dir="results",
         normalize_input=True,
-        optimizer="AdamW",
-        scheduler="StepLR",
+        optimizer="AdamW",  # "AdamW",
+        scheduler=None,  # "StepLR",
         train_weight=10.,
+        batch_first=True,
+        toss_allzero_mn=False,
+        dumb_augment=True,
         score="pearson",
-        metric="l2_pearson"):  # pearson
+        metric="pearson"):  # pearson
     """Run training and validation."""
-    if USE_NEPTUNE:
+    if use_neptune:
         neptune.init("Serre-Lab/deepspine")
         if experiment_name is None:
             experiment_name = "synthetic_data"
@@ -212,6 +237,9 @@ def run_training(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     timestamp = datetime.datetime.fromtimestamp(
         time.time()).strftime('%Y-%m-%d-%H_%M_%S')
+    if model_cfg is None:
+        print("Using default model cfg file.")
+        model_cfg = model_type
     data = np.load(DATA_FILE)
     mn = data["mn"]
     ees = data["ees"]
@@ -220,14 +248,18 @@ def run_training(
     Y = torch.from_numpy(mn.astype(dtype))
     X = X.permute(0, 2, 1)
     Y = Y.permute(0, 2, 1)
+    # X = X[..., 0][..., None]  # Only ees -- 0.73
+    # X = X[..., 1:]  # Only kinematics -- 0.89
     input_size = X.size(-1)
     output_size = Y.size(-1)
     meta = Meta(
+        batch_first=batch_first,
         data_size=X.shape,
         train_batch=train_batch,
         val_batch=val_batch,
         val_split=val_split,
         model_type=model_type,
+        model_cfg=model_cfg,
         input_size=input_size,
         hidden_size=hidden_size,
         output_size=output_size,
@@ -247,6 +279,12 @@ def run_training(
         device=device)
 
     # Prepare data
+    if toss_allzero_mn:
+        # Restrict to nonzero mn fibers
+        mask = (Y.sum(1) > 0).sum(-1) == 2
+        print("Throwing out {} examples.".format((mask == False).sum()))
+        X = X[mask]
+        Y = Y[mask]
     if meta.start_trim:
         X = X.narrow(1, meta.start_trim, X.size(1) - meta.start_trim)
         Y = Y.narrow(1, meta.start_trim, Y.size(1) - meta.start_trim)
@@ -263,7 +301,11 @@ def run_training(
     if meta.normalize_input:
         # X = (X - 127.5) / 127.5
         # Y = (Y - 127.5) / 127.5
-        X = (X - X.mean(1, keepdim=True)) / (X.std(1, keepdim=True) + 1e-8)  # This is peaking but whatever...
+        k_X = X[..., 1:]
+        k_X = (k_X - k_X.mean(1, keepdim=True)) / (k_X.std(1, keepdim=True) + 1e-8)  # This is peaking but whatever...
+        e_X = X[..., 0][..., None]
+        e_X = e_X / 255.
+        X = torch.cat((k_X, e_X), -1)
         if meta.metric != "bce":
             Y = (Y - Y.mean(1, keepdim=True)) / (Y.std(1, keepdim=True) + 1e-8)
     X = X.to(meta.device)
@@ -277,15 +319,28 @@ def run_training(
     assert meta.train_batch < len(X_train), "Train batch size > dataset size {}.".format(len(X_train) - 1)
     assert meta.val_batch < len(X_val), "Val batch size > dataset size {}.".format(len(X_val) - 1)
 
+    if dumb_augment:
+        X_train = torch.cat((X_train, X_train[:, torch.arange(X_train.size(1) - 1, -1, -1).long()]))
+        Y_train = torch.cat((Y_train, Y_train[:, torch.arange(Y_train.size(1) - 1, -1, -1).long()]))
+
+    if not meta.batch_first:
+        X_train = X_train.permute(1, 0, 2)
+        Y_train = Y_train.permute(1, 0, 2)
+        X_val = X_val.permute(1, 0, 2)
+        Y_val = Y_val.permute(1, 0, 2)
+
     # Create model
     model = modeling.create_model(
+        batch_first=meta.batch_first,
+        bptt=meta.bptt,
         model_type=meta.model_type,
+        model_cfg=meta.model_cfg,
         input_size=meta.input_size,
         hidden_size=meta.hidden_size,
         output_size=meta.output_size,
         default_model_params=default_model_params,
         device=meta.device)
-    score, criterion = metrics.get_metric(metric)
+    score, criterion = metrics.get_metric(metric, meta.batch_first)
     optimizer_fun = optimizers.get_optimizer(optimizer)
     assert lr < 1, "LR is greater than 1."
     if "adam" in optimizer.lower():
@@ -299,13 +354,21 @@ def run_training(
     # Start training
     best_val_loss = float("inf")
     best_model = None
-    X_val, _ = batchify(X_val, bsz=meta.val_batch, random=False)
-    Y_val, _ = batchify(Y_val, bsz=meta.val_batch, random=False)
+    X_val, _ = batchify(X_val, bsz=meta.val_batch, random=False, batch_first=meta.batch_first)
+    Y_val, _ = batchify(Y_val, bsz=meta.val_batch, random=False, batch_first=meta.batch_first)
     for epoch in range(1, meta.epochs + 1):
         epoch_start_time = time.time()
         meta.epoch = epoch
-        X_train_i, random_idx = batchify(X_train, bsz=meta.train_batch, random=True)
-        Y_train_i, _ = batchify(Y_train, bsz=meta.train_batch, random=random_idx)
+        X_train_i, random_idx = batchify(
+            X_train,
+            bsz=meta.train_batch,
+            random=True,
+            batch_first=meta.batch_first)
+        Y_train_i, _ = batchify(
+            Y_train,
+            bsz=meta.train_batch,
+            random=random_idx,
+            batch_first=meta.batch_first)
         min_train_loss, max_train_loss, train_output, train_gt = train(
             model=model,
             X=X_train_i,
@@ -334,7 +397,7 @@ def run_training(
                   meta.val_loss[-1],
                   meta.val_score[-1]))
             print('-' * 89)
-            if USE_NEPTUNE:
+            if use_neptune:
                 neptune.log_metric('min_train_loss', min_train_loss)
                 neptune.log_metric('max_train_loss', max_train_loss)
                 neptune.log_metric('val_{}'.format(meta.metric), val_loss)
@@ -366,12 +429,34 @@ def run_training(
     # Fix some type issues
     meta.val_loss = [x.cpu() for x in meta.val_loss]
     meta.val_score = [x.cpu() for x in meta.val_score]
-    meta.min_train_loss = [x.cpu() for x in meta.min_train_loss]
-    meta.max_train_loss = [x.cpu() for x in meta.max_train_loss]
     np.savez(os.path.join(output_dir, '{}results_{}'.format(experiment_name, timestamp)), **meta.__dict__)  # noqa
 
 
 if __name__ == '__main__':
-    _, experiment_name = sys.argv
-    run_training(experiment_name)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--name',
+        dest='experiment_name',
+        type=str,
+        default=None,
+        help='Name of the experiment.')
+    parser.add_argument(
+        '--model',
+        dest='model_type',
+        type=str,
+        default=None,
+        help='Name of model to load.')
+    parser.add_argument(
+        '--model_cfg',
+        dest='model_cfg',
+        type=str,
+        default=None,
+        help='Name of model cfg file to load.')
+    parser.add_argument(
+        '--neptune',
+        dest='use_neptune',
+        action='store_true',
+        help='Push results to neptune.')
+    args = parser.parse_args()
+    run_training(**vars(args))
 
