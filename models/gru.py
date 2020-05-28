@@ -11,6 +11,7 @@ class GRU(nn.Module):
             input_size,
             hidden_size,
             output_size,
+            bptt,
             attention=False,
             dropout=False,
             bidirectional=False,
@@ -46,7 +47,7 @@ class GRU(nn.Module):
             dropout=dropout,
             batch_first=batch_first)
         # self.out = nn.Linear(self.multiplier * output_size, output_size)
-        self.out = nn.Linear(700 * output_size, 700 * output_size)
+        # self.out = nn.Linear(bptt * output_size, bptt * output_size)
 
     def forward(self, input):
         """Process data."""
@@ -60,9 +61,9 @@ class GRU(nn.Module):
         input = F.relu(input.permute(0, 2, 1))
         hidden = self.init_hidden(input)
         output, hidden = self.gru(input, hidden)
-        output = torch.sigmoid(self.out(output.reshape(output.size(0), -1)))
+        # output = torch.sigmoid(self.out(output.reshape(output.size(0), -1)))
         # output = self.out(output)
-        output = output.view(output.size(0), input.size(1), self.output_size).contiguous()
+        # output = output.view(output.size(0), input.size(1), self.output_size).contiguous()
         return output, hidden
 
     def init_hidden(self, input):

@@ -6,17 +6,21 @@ import math
 import argparse
 import numpy as np
 import torch 
-import neptune
 import yaml
 from utils import modeling
 from utils import metrics
 from utils import optimizers
 from utils import tools
-
+try:
+    import neptune
+    NEPTUNE_IMPORTED = True
+except:
+    print("Failed to import neptune.")
+    NEPTUNE_IMPORTED = False
 
 np.random.seed(0)
 torch.manual_seed(0)
-DATA_DIR  = "data"
+DATA_DIR  = "/media/data_cifs/cluster_projects/transformer_spine/data"
 DATA_FILE = os.path.join(DATA_DIR, "processed_data_uint8.npz")
 
 
@@ -219,7 +223,7 @@ def run_training(
         clip_grad_norm=False,
         output_dir="results",
         normalize_input=True,
-        optimizer="AdamW",  # "AdamW",
+        optimizer="Adam",  # "AdamW",
         scheduler=None,  # "StepLR",
         train_weight=10.,
         batch_first=True,
@@ -228,11 +232,12 @@ def run_training(
         score="pearson",
         metric="pearson"):  # pearson
     """Run training and validation."""
-    if use_neptune:
+    if use_neptune and NEPTUNE_IMPORTED:
         neptune.init("Serre-Lab/deepspine")
         if experiment_name is None:
             experiment_name = "synthetic_data"
         neptune.create_experiment(experiment_name)
+    assert model_type is not None, "You must select a model."
     default_model_params = tools.get_model_defaults()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     timestamp = datetime.datetime.fromtimestamp(
@@ -399,7 +404,7 @@ def run_training(
                   meta.val_loss[-1],
                   meta.val_score[-1]))
             print('-' * 89)
-            if use_neptune:
+            if use_neptune and NEPTUNE_IMPORTED:
                 neptune.log_metric('min_train_loss', min_train_loss)
                 neptune.log_metric('max_train_loss', max_train_loss)
                 neptune.log_metric('val_{}'.format(meta.metric), val_loss)
