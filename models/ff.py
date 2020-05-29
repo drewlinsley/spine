@@ -11,6 +11,7 @@ class FF(nn.Module):
             input_size,
             hidden_size,
             output_size,
+            bptt,
             attention=False,
             dropout=False,
             bidirectional=False,

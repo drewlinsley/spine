@@ -2,8 +2,14 @@ import numpy as np
 from models import transformer
 from torch import nn
 from models import gru
+from models import grup
+from models import grup_control
 from models import ff
 from models import linear
+try:
+    from models import ds
+except:
+    print("Failed to import deepspine.")
 # from models import lstm
 
 
@@ -30,14 +36,20 @@ def create_model(
     if model_type.lower() == "transformer":
         dct = default_model_params[model_cfg]
         model = transformer.TransformerModel(**dct)
-    elif model_type.lower() == 'lstm':
+    elif model_type.lower() == "lstm":
         model = lstm.LSTM(**dct)
-    elif model_type.lower() == 'gru':
+    elif model_type.lower() == "gru":
         model = gru.GRU(**dct)
+    elif model_type.lower() == "grup":
+        model = grup.GRUP(**dct)
+    elif model_type.lower() == "grup_control":
+        model = grup_control.GRUP_CONTROL(**dct)
     elif model_type.lower() == "ff":
         model = ff.FF(**dct)
     elif model_type.lower() == "linear":
         model = linear.linear(**dct)
+    elif model_type.lower() == "ds":
+        model = ds.DS(**dct)
     else:
         raise NotImplementedError(model_type)
     return model.to(device)

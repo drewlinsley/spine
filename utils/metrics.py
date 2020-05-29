@@ -102,8 +102,8 @@ def pearsonr(x, y, batch_first=False, eps=1e-8, REDUCE="mean"):
 
 def bce_pearson(x, y):
     """Pearson after thresholding x."""
-    # return pearsonr((torch.sigmoid(x)), y)
-    return pearsonr((torch.sigmoid(x) > 0.5).float(), y)
+    return pearsonr((torch.sigmoid(x)), y)
+    # return pearsonr((torch.sigmoid(x) > 0.5).float(), y)
 
 
 def get_metric(metric, batch_first):
@@ -115,13 +115,19 @@ def get_metric(metric, batch_first):
         metric = lambda x, y: pearsonr(x, y, REDUCE="max")
     elif metric.lower() == 'l2':
         metric = lambda x, y: torch.norm(x - y, 2)
+    elif metric.lower() == 'l1':
+        metric = lambda x, y: torch.norm(x - y, 1)
     elif metric.lower() == 'l2_pearson':
-        metric = lambda x, y: (pearsonr(x, y, batch_first) + 1e-4 * torch.norm(x - y, 2))
+        metric = lambda x, y: (pearsonr(x, y, batch_first) + 1. * torch.norm(x - y, 2))
     elif metric.lower() == 'l1_pearson':
         metric = lambda x, y: (pearsonr(x, y, batch_first) + 1e-2 * torch.norm(x - y, 1))
     elif metric.lower() == 'bce':
         metric = torch.nn.BCEWithLogitsLoss  # (pos_weight=torch.Tensor(10))
-        score = lambda x, y: bce_pearson(x, y, batch_first)
+        score = lambda x, y: bce_pearson(x, y)
+    elif metric.lower() == "poisson":
+        metric = lambda x, y: torch.nn.PoissonNLLLoss()(x, y)
+    elif metric.lower() == "huber":
+        metric = lambda x, y: torch.nn.SmoothL1Loss()(x, y)
     else:
         return NotImplementedError('Metric {} not implemented'.format(metric))
     return score, metric

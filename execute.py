@@ -20,7 +20,7 @@ except:
 
 np.random.seed(0)
 torch.manual_seed(0)
-DATA_DIR  = "/media/data_cifs/cluster_projects/transformer_spine/data"
+DATA_DIR  = "/media/data_cifs/cluster_projects/spine/data"
 DATA_FILE = os.path.join(DATA_DIR, "processed_data_uint8.npz")
 
 
@@ -147,6 +147,9 @@ def train(model, X, Y, optimizer, criterion, score, scheduler, meta):
                 pos_weight=torch.ones(output.size(2)).to(meta.device) * meta.train_weight)(output, y)
         else:
             loss = criterion(output, y)
+        if hasattr(model, "dist"):
+            # Hiddens is a weighted kl div
+            loss = loss + hiddens
         loss.backward()
         if meta.clip_grad_norm:
             torch.nn.utils.clip_grad_norm_(model.parameters(), meta.clip_grad_norm)
@@ -156,7 +159,7 @@ def train(model, X, Y, optimizer, criterion, score, scheduler, meta):
         min_loss = min(loss, min_loss)
         max_loss = max(loss, max_loss)
         if batch % meta.log_interval == 0 and batch > 0 or batch == (len(offset_X) - 1):
-            if meta.metric != meta.score:
+            if 1:  # meta.metric != meta.score:  # TODO
                 sc = score(output, y)
             else:
                 sc = loss
@@ -194,7 +197,7 @@ def evaluate(model, X, Y, criterion, score, meta):
             else:
                 it_loss = criterion(output, y)
             total_loss += it_loss
-            if meta.metric != meta.score:
+            if 1:  # meta.metric != meta.score:  # TODO
                 sc = score(output, y)
             else:
                 sc = it_loss
@@ -205,19 +208,21 @@ def evaluate(model, X, Y, criterion, score, meta):
 def run_training(
         experiment_name,
         debug=False,
+        only_ees=False,
+        only_kinematics=False,
         use_neptune=False,
-        epochs=10000,
-        train_batch=58732 // 4,
-        val_batch=3091,
+        epochs=2000,  # 20000
+        train_batch=21330,  # 54726 // 2,
+        val_batch=1123,  # 2000
         dtype=np.float32,
         val_split=0.05,
         shuffle_data=True,
         model_type="linear",  # "GRU",  # 'transformer',
         model_cfg=None,
-        bptt=700,
+        bptt=350,
         hidden_size=6,
         lr=1e-2,
-        start_trim=750,
+        start_trim=700,
         log_interval=5,
         val_interval=20,
         clip_grad_norm=False,
@@ -225,12 +230,12 @@ def run_training(
         normalize_input=True,
         optimizer="Adam",  # "AdamW",
         scheduler=None,  # "StepLR",
-        train_weight=10.,
+        train_weight=100.,
         batch_first=True,
-        toss_allzero_mn=False,
+        toss_allzero_mn=True,
         dumb_augment=False,
         score="pearson",
-        metric="pearson"):  # pearson
+        metric="l2"):  # pearson
     """Run training and validation."""
     if use_neptune and NEPTUNE_IMPORTED:
         neptune.init("Serre-Lab/deepspine")
@@ -253,8 +258,10 @@ def run_training(
     Y = torch.from_numpy(mn.astype(dtype))
     X = X.permute(0, 2, 1)
     Y = Y.permute(0, 2, 1)
-    # X = X[..., 0][..., None]  # Only ees -- 0.73
-    # X = X[..., 1:]  # Only kinematics -- 0.89
+    if only_ees:
+        X = X[..., 0][..., None]  # Only ees -- 0.73
+    if only_kinematics:
+        X = X[..., 1:]  # Only kinematics -- 0.89
     input_size = X.size(-1)
     output_size = Y.size(-1)
     meta = Meta(
@@ -286,7 +293,9 @@ def run_training(
     # Prepare data
     if toss_allzero_mn:
         # Restrict to nonzero mn fibers
-        mask = (Y.sum(1) > 0).sum(-1) == 2
+        # mask = (Y.sum(1) > 127.5).sum(-1) == 2  # Ys where both are nonzero at some point
+        mask = ((Y > 200).sum(1) > 0).sum(-1) == 2  # Ys where both are > 127.5 at some point
+        # mask = ((Y > 127.5).sum(1) > 0).sum(-1) >= 1  # Ys where either is > 127.5 at some point
         print("Throwing out {} examples.".format((mask == False).sum()))
         X = X[mask]
         Y = Y[mask]
@@ -299,10 +308,6 @@ def run_training(
         X = X[idx]
         Y = Y[idx]
 
-    if meta.metric == "bce":
-        # Quantize Y
-        Y = (Y > 127.5).float()
-
     if meta.normalize_input:
         # X = (X - 127.5) / 127.5
         # Y = (Y - 127.5) / 127.5
@@ -313,6 +318,10 @@ def run_training(
         X = torch.cat((k_X, e_X), -1)
         if meta.metric != "bce":
             Y = (Y - Y.mean(1, keepdim=True)) / (Y.std(1, keepdim=True) + 1e-8)
+            # Y = Y / 255.
+        else:
+            # Quantize Y
+            Y = (Y > 127.5).float()
     X = X.to(meta.device)
     Y = Y.to(meta.device)
     cv_idx = np.arange(len(X))
@@ -437,6 +446,8 @@ def run_training(
     meta.val_loss = [x.cpu() for x in meta.val_loss]
     meta.val_score = [x.cpu() for x in meta.val_score]
     np.savez(os.path.join(output_dir, '{}results_{}'.format(experiment_name, timestamp)), **meta.__dict__)  # noqa
+    np.savez(os.path.join(output_dir, '{}example_{}'.format(experiment_name, timestamp)), train_output=train_output.cpu().detach(), train_gt=train_gt.cpu(), val_output=val_output.cpu(), val_gt=val_gt.cpu())
+    torch.save(best_model.state_dict(), os.path.join(output_dir, '{}model_{}.pth'.format(experiment_name, timestamp)))
 
 
 if __name__ == '__main__':
@@ -455,6 +466,7 @@ if __name__ == '__main__':
         help='Name of model to load.')
     parser.add_argument(
         '--model_cfg',
+        '--cfg',
         dest='model_cfg',
         type=str,
         default=None,
@@ -464,6 +476,16 @@ if __name__ == '__main__':
         dest='use_neptune',
         action='store_true',
         help='Push results to neptune.')
+    parser.add_argument(
+        '--only_ees',
+        dest='only_ees',
+        action='store_true',
+        help='Only use ees in the input.')
+    parser.add_argument(
+        '--only_kinematics',
+        dest='only_kinematics',
+        action='store_true',
+        help='Only use kinematics in the input.')
     args = parser.parse_args()
     run_training(**vars(args))
 
